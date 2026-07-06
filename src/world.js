@@ -2,6 +2,7 @@ import {
   BX0, BX1, ROOMS, ROOM_W, PLOT_XS, FISH_SPOT_XS, PIER_L, PIER_R,
   INFIRMARY_BEDS, FLOOR_BOTTOM_Y, FLOOR_NAMES, FLOOR_H, WATER_Y, tileCX,
 } from "./mapData.js";
+import { Rat } from "./rat.js";
 
 const DAY_LEN = 140; // seconds per in-game day
 const TASK_PRIORITY = { medicine: 0, trade: 1, repair: 2, haul: 3, harvest: 4, tend: 5, plant: 6 };
@@ -41,10 +42,12 @@ export class World {
     this.flood = { active: false, t: 0, level: 0, waterY: WATER_Y };
     this.weather = "sunny";
     this.weatherT = 30 + Math.random() * 20;
-    this.sickList = []; // {student, t, treated, treatT}
+    this.sickList = []; // {student, t, treated, treatT, kind}
     this.infOcc = new Map(); // student -> infirmary bed
     this.logs = [];
     this.students = [];
+    this.rats = [];
+    this.ratSpawnT = 25 + Math.random() * 30;
   }
 
   get phase() {
@@ -145,6 +148,15 @@ export class World {
       rec.t += dt;
       if ((rec.treated && rec.t >= rec.treatT + 15) || rec.t >= 90) this.cure(rec);
     }
+
+    if (!this.flood.active) {
+      this.ratSpawnT -= dt;
+      if (this.ratSpawnT <= 0 && this.rats.length < 2) {
+        this.rats.push(new Rat(this.scene, this));
+        this.ratSpawnT = 40 + Math.random() * 45;
+      }
+    }
+    for (const rat of this.rats) rat.update(dt);
   }
 
   // ---- weather -------------------------------------------------------------
@@ -306,10 +318,7 @@ export class World {
       if (c.length) this.makeSick(c[(Math.random() * c.length) | 0]);
       else this.makeLeak();
     } else if (r < 0.52) {
-      if (this.stocks.food > 2) {
-        this.stocks.food -= 2;
-        this.log("🐀 ネズミが食料をかじった…(食料-2)");
-      } else this.spawnBonus();
+      this.spawnRatEvent();
     } else if (r < 0.64) {
       this.spawnBonus();
     } else if (r < 0.70) {
@@ -362,13 +371,13 @@ export class World {
     this.log(`🔧 ${by.name}が${leak.room.name}の雨漏りを修理した`);
   }
 
-  makeSick(st) {
+  makeSick(st, kind = "fever") {
     st.sick = true;
     st.interrupt();
-    const rec = { student: st, t: 0, treated: false, treatT: 0 };
+    const rec = { student: st, t: 0, treated: false, treatT: 0, kind };
     this.sickList.push(rec);
     this.tasks.push({ type: "medicine", patient: st, rec });
-    this.log(`🤒 ${st.name}が熱を出して寝込んでしまった…`);
+    if (kind !== "bite") this.log(`🤒 ${st.name}が熱を出して寝込んでしまった…`);
   }
 
   cure(rec) {
@@ -377,7 +386,41 @@ export class World {
     if (i >= 0) this.sickList.splice(i, 1);
     const task = this.tasks.find((t) => t.type === "medicine" && t.rec === rec);
     if (task) this.cancelTask(task);
-    this.log(`✨ ${rec.student.name}の熱が下がった!`);
+    this.log(rec.kind === "bite" ? `✨ ${rec.student.name}の怪我が治った!` : `✨ ${rec.student.name}の熱が下がった!`);
+  }
+
+  // ---- rats -----------------------------------------------------------------
+
+  _removeRat(rat) {
+    rat.huntedBy = null;
+    const i = this.rats.indexOf(rat);
+    if (i >= 0) this.rats.splice(i, 1);
+    rat.destroy();
+  }
+
+  resolveRatEncounter(student, rat) {
+    const roll = Math.random();
+    if (roll < 0.55) {
+      this.log(`🐀💨 ${student.name}がネズミを追い払った!`);
+      this._removeRat(rat);
+    } else if (roll < 0.8) {
+      this.log(`😲 ${student.name}はネズミに驚いて飛び退いた!`);
+      this._removeRat(rat);
+    } else {
+      this.log(`🐀😖 ${student.name}はネズミに反撃されて怪我をしてしまった…保健室へ`);
+      this._removeRat(rat);
+      this.makeSick(student, "bite");
+    }
+  }
+
+  spawnRatEvent() {
+    if (this.rats.length < 3 && !this.flood.active) {
+      this.rats.push(new Rat(this.scene, this));
+      this.log("🐀 ネズミが物置から顔を出した!");
+    } else if (this.stocks.food > 2) {
+      this.stocks.food -= 2;
+      this.log("🐀 ネズミが食料をかじった…(食料-2)");
+    }
   }
 
   takeInfBed(st) {
@@ -464,6 +507,7 @@ export class World {
         st.setEmote("💦");
       }
     }
+    for (const rat of [...this.rats]) this._removeRat(rat);
     if (this.flood.level >= 2) {
       this.log("🌊⚠️ 水位が大きく上昇してきた!2階の寝室まで危ない!");
     } else {
