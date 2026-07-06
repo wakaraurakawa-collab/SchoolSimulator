@@ -1,5 +1,5 @@
 import {
-  BX0, BX1, GRID_W, BEDS, BINS, DINING, PLAY_SPOTS, STUDY_SPOTS, TRADE_X,
+  BX0, BX1, GRID_W, TILE, BEDS, BINS, DINING, PLAY_SPOTS, STUDY_SPOTS, TRADE_X,
   MAKESHIFT_SLEEP, tileCX, walkY,
 } from "./mapData.js";
 import { findPath } from "./pathfinding.js";
@@ -7,11 +7,76 @@ import { RES } from "./resource.js";
 
 const BASE_SPEED = 55; // px/sec
 const FAV_TASKS = ["haul", "tend", "harvest", "repair", "fish", "study"];
-const CHAT_LINES = [
-  "{a}と{b}がおしゃべりしている",
-  "{a}が{b}に今日あったことを話している",
-  "{a}と{b}が声をあげて笑っている",
-  "{a}と{b}がひそひそ話をしている",
+const FAV_LABELS = {
+  haul: "物資運び", tend: "水やり", harvest: "収穫", repair: "修理", fish: "釣り", study: "勉強",
+};
+const clamp100 = (v) => Math.max(0, Math.min(100, v));
+
+// Each topic is a function returning the "about ___" fragment of the opening
+// line. Combined with the outcome pool below this gives a large spread of
+// distinct conversations even though both lists stay short.
+const CHAT_TOPICS = [
+  (a, b, w) => `${RES[Object.keys(RES)[(Math.random() * 4) | 0]].name}が足りているかどうか`,
+  (a, b, w) => `${w.season === "winter" ? "寒さ" : w.season === "summer" ? "暑さ" : "季節の変わり目"}のこと`,
+  (a, b, w) => `${FAV_LABELS[a.favTask] ?? "日課"}のコツ`,
+  (a, b, w) => `${b.name}の意外な一面`,
+  (a, b, w) => "昨日見た夢の話",
+  (a, b, w) => "行商船が次いつ来るか",
+  (a, b, w) => "屋上菜園の野菜がうまく育つか",
+  (a, b, w) => `${["音楽", "絵", "本", "ゲーム", "料理"][(Math.random() * 5) | 0]}の好み`,
+  (a, b, w) => "もし学校の外に出られたら何をしたいか",
+  (a, b, w) => `${w.weather === "rain" ? "雨" : w.weather === "cloudy" ? "曇り空" : "天気"}のこと`,
+  (a, b, w) => "隠していたお菓子の話",
+  (a, b, w) => "誰が一番早起きか",
+  (a, b, w) => "ネズミ対策",
+  (a, b, w) => "寝室の布団が足りているか",
+  (a, b, w) => "昔の失敗談",
+  (a, b, w) => `${FAV_LABELS[b.favTask] ?? "日課"}を手伝ってほしいという相談`,
+];
+
+// Each outcome pairs a result line with the stat effect it applies to both
+// participants once the conversation wraps up.
+const CHAT_OUTCOMES = [
+  {
+    text: (a, b) => `盛り上がって${a.name}も${b.name}も元気になった`,
+    effect: (a, b) => { a.fun = clamp100(a.fun + 15); b.fun = clamp100(b.fun + 15); },
+  },
+  {
+    text: (a, b) => `${a.name}の冗談に${b.name}が大笑いした`,
+    effect: (a, b) => { a.fun = clamp100(a.fun + 8); b.fun = clamp100(b.fun + 16); },
+  },
+  {
+    text: (a, b) => "微妙にかみ合わず、ちょっと気まずい空気になった",
+    effect: (a, b) => { a.fun = clamp100(a.fun - 4); b.fun = clamp100(b.fun - 4); },
+  },
+  {
+    text: (a, b) => `${b.name}が${a.name}の相談に乗ってくれた`,
+    effect: (a, b) => { a.fun = clamp100(a.fun + 6); a.sleepDebt = Math.max(0, a.sleepDebt - 6); },
+  },
+  {
+    text: () => "怖い話になって二人とも鳥肌が立った",
+    effect: (a, b) => { a.fun = clamp100(a.fun + 3); b.fun = clamp100(b.fun + 3); },
+  },
+  {
+    text: (a, b) => `${a.name}と${b.name}は意気投合し、これからも仲良くしようと約束した`,
+    effect: (a, b) => { a.fun = clamp100(a.fun + 12); b.fun = clamp100(b.fun + 12); },
+  },
+  {
+    text: () => "特に盛り上がらず、なんとなく自然解散した",
+    effect: (a, b) => { a.fun = clamp100(a.fun + 1); b.fun = clamp100(b.fun + 1); },
+  },
+  {
+    text: (a, b) => `${b.name}が${a.name}を励まし、少し元気が出た`,
+    effect: (a, b) => { a.energy = clamp100(a.energy + 8); b.fun = clamp100(b.fun + 4); },
+  },
+  {
+    text: (a, b) => `途中で口論になったが、すぐ${Math.random() < 0.5 ? a.name : b.name}が折れて仲直りした`,
+    effect: (a, b) => { a.fun = clamp100(a.fun - 2); b.fun = clamp100(b.fun - 2); },
+  },
+  {
+    text: () => "昔の失敗談で二人とも大盛り上がりした",
+    effect: (a, b) => { a.fun = clamp100(a.fun + 10); b.fun = clamp100(b.fun + 10); },
+  },
 ];
 
 export class Student {
@@ -49,6 +114,9 @@ export class Student {
     this.favTask = FAV_TASKS[(Math.random() * FAV_TASKS.length) | 0];
     this.favSpotIdx = (Math.random() * PLAY_SPOTS.length) | 0;
     this.chatCooldown = Math.random() * 20;
+    this.chatSession = null;
+    this.huntTarget = null;
+    this.huntT = 0;
 
     const color = Phaser.Display.Color.HSLToColor(Math.random(), 0.5, 0.62).color;
     this.body = scene.add.circle(this.px, this.py, 6, color).setStrokeStyle(1, 0x10131a).setDepth(10);
@@ -102,6 +170,11 @@ export class Student {
       this.world.stocks[this.carrying.type]++;
       this.carrying = null;
     }
+    this.chatSession = null;
+    if (this.huntTarget) {
+      this.huntTarget.huntedBy = null;
+      this.huntTarget = null;
+    }
     this.path = [];
     this.afterWalk = null;
     this.workDone = null;
@@ -154,14 +227,18 @@ export class Student {
         break;
       case "play":
       case "study":
-      case "chat":
         this.stateT -= dt;
         if (this.stateT <= 0) {
           this.setEmote("");
           this.state = "idle";
         }
         break;
+      case "chat":
+        this.stateT -= dt;
+        if (this.stateT <= 0) this._resolveChat();
+        break;
       case "fish": this._fish(dt); break;
+      case "hunt": this._hunt(dt); break;
       case "sleep": {
         const wake = this.nap ? this.energy >= 60 : w.phase === "day" && this.energy >= 40;
         if (wake) {
@@ -206,6 +283,7 @@ export class Student {
     if (this.sick || this.exhausted) {
       return this._goBed(w.takeInfBed(this) || BEDS[this.bedIdx], "bedrest");
     }
+    if (phase !== "night" && this._tryHuntRat()) return;
     if (phase !== "night" && this._tryChat()) return;
     if (phase === "night") {
       if (this.nightOwl && w.clock.t < 122 && this.energy > 30 && Math.random() < 0.8) {
@@ -249,7 +327,9 @@ export class Student {
     this._goPlay();
   }
 
-  // Two idle students nearby strike up a quick conversation.
+  // Two idle students nearby strike up a quick conversation. The topic and
+  // outcome are each drawn independently from their own pools, so the same
+  // pair rarely has the "same" conversation twice.
   _tryChat() {
     const w = this.world;
     if (this.chatCooldown > 0 || Math.random() > 0.15) return false;
@@ -257,17 +337,78 @@ export class Student {
       o !== this && o.state === "idle" && o.chatCooldown <= 0 &&
       !o.sick && !o.exhausted && o.f === this.f && Math.abs(o.x - this.x) <= 4);
     if (!partner) return false;
-    const line = CHAT_LINES[(Math.random() * CHAT_LINES.length) | 0]
-      .replace("{a}", this.name).replace("{b}", partner.name);
-    w.log(`💬 ${line}`, 0.85);
+
+    const topic = CHAT_TOPICS[(Math.random() * CHAT_TOPICS.length) | 0](this, partner, w);
+    const outcome = CHAT_OUTCOMES[(Math.random() * CHAT_OUTCOMES.length) | 0];
+    const session = { resolved: false, outcome };
+    w.log(`💬 ${this.name}と${partner.name}が、${topic}について話している`, 0.85);
+
     for (const s of [this, partner]) {
       s.state = "chat";
-      s.stateT = 3 + Math.random() * 3;
+      s.stateT = 4 + Math.random() * 4;
       s.setEmote("💬");
-      s.fun = Math.min(100, s.fun + 10);
       s.chatCooldown = 45 + Math.random() * 30;
+      s.chatSession = session;
     }
+    // Store which of the pair is "a" so the outcome text/effect apply consistently.
+    session.a = this;
+    session.b = partner;
     return true;
+  }
+
+  _resolveChat() {
+    const session = this.chatSession;
+    this.chatSession = null;
+    this.setEmote("");
+    this.state = "idle";
+    if (!session || session.resolved) return;
+    session.resolved = true;
+    const { a, b, outcome } = session;
+    outcome.effect(a, b);
+    this.world.log(`→ ${outcome.text(a, b)}`, 0.9);
+  }
+
+  // A nearby, unclaimed rat catches this student's eye.
+  _tryHuntRat() {
+    const w = this.world;
+    const rat = w.rats.find((r) => !r.huntedBy && r.f === this.f && Math.abs(r.x - this.x) <= 6);
+    if (!rat || Math.random() > 0.25) return false;
+    rat.huntedBy = this;
+    this.huntTarget = rat;
+    this.huntT = 6;
+    this.state = "hunt";
+    this.setEmote("👀");
+    return true;
+  }
+
+  _hunt(dt) {
+    const w = this.world;
+    const rat = this.huntTarget;
+    if (!rat || !w.rats.includes(rat)) {
+      this.huntTarget = null;
+      this.setEmote("");
+      this.state = "idle";
+      return;
+    }
+    this.huntT -= dt;
+    const dx = rat.px - this.px;
+    if (Math.abs(dx) <= 6) {
+      w.resolveRatEncounter(this, rat);
+      this.huntTarget = null;
+      this.setEmote("");
+      this.state = "idle";
+      return;
+    }
+    if (this.huntT <= 0) {
+      rat.huntedBy = null;
+      this.huntTarget = null;
+      this.setEmote("");
+      this.state = "idle";
+      return;
+    }
+    this.f = 0;
+    this.px += Math.sign(dx) * BASE_SPEED * this._speedMul() * 1.1 * dt;
+    this.x = Math.round(this.px / TILE);
   }
 
   // ---- movement --------------------------------------------------------------
