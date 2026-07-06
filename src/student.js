@@ -58,10 +58,29 @@ export class Student {
     }).setOrigin(0.5).setDepth(11);
     this.emoteTxt = scene.add.text(this.px, this.py - 27, "", { fontSize: "11px" })
       .setOrigin(0.5).setDepth(11);
+    this.faceTxt = scene.add.text(this.px + 8, this.py - 6, "🙂", { fontSize: "9px" })
+      .setOrigin(0.5).setDepth(12);
   }
 
   setEmote(s) {
     this.emoteTxt.setText(s);
+  }
+
+  // A small mood face shown continuously on the student's head (separate
+  // from the transient task/activity emote bubble above them).
+  _moodFace() {
+    if (this.sick) return "🤒";
+    if (this.exhausted) return "😵";
+    if (this.state === "chat") return "😄";
+    if (this.state === "eat") return "😋";
+    if (this.hunger <= 15) return "😖";
+    if (this.energy <= 15) return "🥱";
+    if (this.sleepDebt >= 60) return "😪";
+    if (this.hunger <= 35) return "😟";
+    if (this.fun <= 15) return "😞";
+    if (this.fun >= 75 && this.energy >= 55) return "😊";
+    if (this.fun >= 45 && this.hunger >= 45) return "🙂";
+    return "😐";
   }
 
   working() {
@@ -174,6 +193,7 @@ export class Student {
         }
         break;
     }
+    this.faceTxt.setText(this._moodFace());
     this._sync();
   }
 
@@ -305,6 +325,7 @@ export class Student {
     this.head.setPosition(this.px, this.py - 6);
     this.label.setPosition(this.px, this.py - 16);
     this.emoteTxt.setPosition(this.px, this.py - 27);
+    this.faceTxt.setPosition(this.px + 8, this.py - 6);
   }
 
   // ---- activities ------------------------------------------------------------
