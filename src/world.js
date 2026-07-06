@@ -8,6 +8,21 @@ const TASK_PRIORITY = { medicine: 0, trade: 1, repair: 2, haul: 3, harvest: 4, t
 const URGENT_TYPES = ["medicine", "trade", "repair"];
 const OUTDOOR_TYPES = ["haul", "trade", "plant", "tend", "harvest"];
 
+export const DAYS_PER_SEASON = 4;
+export const SEASONS = ["spring", "summer", "autumn", "winter"];
+export const SEASON_INFO = {
+  spring: { icon: "🌸", label: "春" },
+  summer: { icon: "🌻", label: "夏" },
+  autumn: { icon: "🍁", label: "秋" },
+  winter: { icon: "❄️", label: "冬" },
+};
+// weather -> [next weather -> chance], normalized on pick
+const WEATHER_TABLE = {
+  sunny: { sunny: 0.4, cloudy: 0.6 },
+  cloudy: { sunny: 0.35, cloudy: 0.3, rain: 0.35 },
+  rain: { cloudy: 0.6, rain: 0.4 },
+};
+
 export class World {
   constructor(scene) {
     this.scene = scene;
@@ -22,6 +37,8 @@ export class World {
     this.eventT = 45;
     this.boat = { phase: "none", x: -80, t: 70, traded: false, tradeTask: null };
     this.storm = { active: false, t: 0 };
+    this.weather = "sunny";
+    this.weatherT = 30 + Math.random() * 20;
     this.sickList = []; // {student, t, treated, treatT}
     this.infOcc = new Map(); // student -> infirmary bed
     this.logs = [];
@@ -31,6 +48,22 @@ export class World {
   get phase() {
     const t = this.clock.t;
     return t < 80 ? "day" : t < 110 ? "evening" : "night";
+  }
+
+  get dayFrac() {
+    return this.clock.t / DAY_LEN;
+  }
+
+  get season() {
+    return SEASONS[Math.floor((this.clock.day - 1) / DAYS_PER_SEASON) % SEASONS.length];
+  }
+
+  get isSnowing() {
+    return this.weather === "rain" && this.season === "winter";
+  }
+
+  get growthMul() {
+    return this.season === "winter" ? 1.6 : this.season === "summer" ? 0.85 : 1;
   }
 
   log(text, chance = 1) {
@@ -43,7 +76,17 @@ export class World {
     this.clock.t += dt;
     if (this.clock.t >= DAY_LEN) {
       this.clock.t -= DAY_LEN;
+      const prevSeason = this.season;
       this.clock.day++;
+      if (this.season !== prevSeason) {
+        const info = SEASON_INFO[this.season];
+        this.log(`${info.icon} 季節が${info.label}になった`);
+      }
+    }
+
+    if (!this.storm.active) {
+      this.weatherT -= dt;
+      if (this.weatherT <= 0) this._rollWeather();
     }
 
     this.driftT -= dt;
@@ -54,7 +97,7 @@ export class World {
 
     for (const p of this.plots) {
       if ((p.stage === 1 || p.stage === 2) && p.watered) {
-        p.t += dt;
+        p.t += dt / this.growthMul;
         if (p.t >= 40) {
           p.t = 0;
           p.stage++;
@@ -82,6 +125,26 @@ export class World {
       rec.t += dt;
       if ((rec.treated && rec.t >= rec.treatT + 15) || rec.t >= 90) this.cure(rec);
     }
+  }
+
+  // ---- weather -------------------------------------------------------------
+
+  _rollWeather() {
+    const table = WEATHER_TABLE[this.weather];
+    const total = Object.values(table).reduce((a, b) => a + b, 0);
+    let r = Math.random() * total;
+    let next = this.weather;
+    for (const [w, chance] of Object.entries(table)) {
+      r -= chance;
+      if (r <= 0) { next = w; break; }
+    }
+    if (next !== this.weather) {
+      this.weather = next;
+      const label = next === "rain" ? (this.season === "winter" ? "❄️ 雪が降ってきた" : "🌧 雨が降ってきた")
+        : next === "cloudy" ? "☁️ 曇ってきた" : "☀️ 晴れてきた";
+      this.log(label, 0.7);
+    }
+    this.weatherT = 25 + Math.random() * 30;
   }
 
   // ---- drift supplies ----------------------------------------------------
@@ -208,7 +271,7 @@ export class World {
       } else this.spawnBonus();
     } else if (r < 0.82) {
       this.spawnBonus();
-    } else if (!this.storm.active) {
+    } else if (!this.storm.active && this.weather === "rain") {
       this.startStorm();
     } else {
       this.makeLeak();
@@ -276,6 +339,7 @@ export class World {
   startStorm() {
     this.storm.active = true;
     this.storm.t = 20;
+    this.weather = "rain";
     this.log("⛈ 嵐が来た!みんな屋内へ!");
     for (const st of this.students) {
       const outdoor = st.f === 3 || st.x < BX0 || st.x >= BX1 || st.fishSpot;
@@ -288,6 +352,8 @@ export class World {
 
   endStorm() {
     this.storm.active = false;
+    this.weather = "cloudy";
+    this.weatherT = 25 + Math.random() * 30;
     const nLeak = 1 + (Math.random() < 0.5 ? 1 : 0);
     for (let i = 0; i < nLeak; i++) this.makeLeak();
     const p = this.plots[(Math.random() * this.plots.length) | 0];
