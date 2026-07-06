@@ -5,7 +5,7 @@ import {
   tileCX, walkY,
 } from "../mapData.js";
 import { RES } from "../resource.js";
-import { World } from "../world.js";
+import { World, SEASON_INFO } from "../world.js";
 import { Student } from "../student.js";
 
 const NAMES = ["ミナ", "ユウ", "カイ", "レン", "アオイ", "ソラ", "ハル", "ツキ", "リン", "ナギ", "モモ", "ケイ"];
@@ -14,6 +14,33 @@ const ROOM_COLORS = {
   hall: 0x2b303b, dining: 0x3f3529, kitchen: 0x39332b, storage: 0x2e3436,
   infirmary: 0x3a3142, bedroom: 0x2c3446, study: 0x303a4e, library: 0x363023,
   hq: 0x34323e, music: 0x2f2d3a, workshop: 0x333930, art: 0x372f3b, shed: 0x2f2d26,
+};
+
+// [t, colorHex] keyframes across one full day, wrapping back to the first.
+const SKY_STOPS = [
+  [0, 0x2b3a5c], [16, 0x4f7fb5], [70, 0x5a8fc2],
+  [80, 0xdf9a5a], [95, 0x5d4a78], [110, 0x141a30], [140, 0x2b3a5c],
+];
+
+function skyColorAt(t) {
+  for (let i = 0; i < SKY_STOPS.length - 1; i++) {
+    const [t0, c0] = SKY_STOPS[i];
+    const [t1, c1] = SKY_STOPS[i + 1];
+    if (t >= t0 && t <= t1) {
+      const f = (t - t0) / (t1 - t0);
+      const a = Phaser.Display.Color.ValueToColor(c0);
+      const b = Phaser.Display.Color.ValueToColor(c1);
+      const r = Phaser.Math.Linear(a.red, b.red, f);
+      const g = Phaser.Math.Linear(a.green, b.green, f);
+      const bl = Phaser.Math.Linear(a.blue, b.blue, f);
+      return Phaser.Display.Color.GetColor(r, g, bl);
+    }
+  }
+  return SKY_STOPS[0][1];
+}
+
+const SEASON_TINT = {
+  spring: 0xdff0c8, summer: null, autumn: 0xe8b878, winter: 0xcfe0ee,
 };
 
 export default class MainScene extends Phaser.Scene {
@@ -52,8 +79,8 @@ export default class MainScene extends Phaser.Scene {
 
   _drawStatic() {
     const W = CANVAS_W;
-    // sky
-    this.add.rectangle(W / 2, WATER_Y / 2, W, WATER_Y, 0x1c2333);
+    // sky (recolored every frame for time-of-day)
+    this.skyRect = this.add.rectangle(W / 2, WATER_Y / 2, W, WATER_Y, 0x1c2333).setDepth(-10);
     // submerged foundation, then translucent water over it
     this.add.rectangle((BX0 + (BX1 - BX0) / 2) * TILE, 396, (BX1 - BX0) * TILE, 32, 0x1a1d24);
     this.add.rectangle(W / 2, (WATER_Y + CANVAS_H) / 2, W, CANVAS_H - WATER_Y, 0x16344f, 0.88);
@@ -181,6 +208,27 @@ export default class MainScene extends Phaser.Scene {
   // ---- dynamic objects --------------------------------------------------------
 
   _createDynamic() {
+    // sky bodies: sun, moon, stars, clouds
+    this.sun = this.add.container(0, 0, [
+      this.add.circle(0, 0, 20, 0xfff0b0, 0.25),
+      this.add.circle(0, 0, 11, 0xffe066),
+    ]).setDepth(-8);
+    this.moon = this.add.container(0, 0, [
+      this.add.circle(0, 0, 9, 0xdfe6f2),
+      this.add.circle(3, -2, 2, 0xc3cbdb),
+      this.add.circle(-2, 3, 1.4, 0xc3cbdb),
+    ]).setDepth(-8);
+    this.stars = Array.from({ length: 45 }, () =>
+      this.add.circle(Math.random() * CANVAS_W, Math.random() * (WATER_Y - 20), Math.random() < 0.8 ? 1 : 1.6, 0xffffff)
+        .setDepth(-8).setData("tw", Math.random() * 10));
+    this.clouds = Array.from({ length: 6 }, (_, i) => {
+      const cx = (i * 160 + 60) % CANVAS_W;
+      const cy = 45 + (i % 3) * 30;
+      const puffs = [[-14, 0, 12], [0, -4, 15], [16, 0, 11], [4, 4, 13]];
+      const parts = puffs.map(([ox, oy, r]) => this.add.ellipse(ox, oy, r * 2, r * 1.4, 0xd8dde6));
+      return this.add.container(cx, cy, parts).setDepth(-7).setData("spd", 3 + Math.random() * 4);
+    });
+
     // trading boat
     const hull = this.add.rectangle(0, 0, 54, 12, 0x5d4530).setStrokeStyle(1, 0x2f2318);
     const cabin = this.add.rectangle(-12, -10, 18, 9, 0x7a5a3a);
@@ -202,12 +250,17 @@ export default class MainScene extends Phaser.Scene {
       };
     });
 
-    // rain + night tint
+    // rain + snow + night tint + season tint
     this.rain = Array.from({ length: 50 }, () =>
       this.add.rectangle(Math.random() * CANVAS_W, Math.random() * CANVAS_H, 1.5, 9, 0x9fc0e8, 0.5)
         .setDepth(55).setVisible(false));
+    this.snow = Array.from({ length: 40 }, () =>
+      this.add.circle(Math.random() * CANVAS_W, Math.random() * CANVAS_H, 1.6, 0xffffff, 0.85)
+        .setDepth(55).setVisible(false).setData("sway", Math.random() * 10));
     this.nightOv = this.add.rectangle(CANVAS_W / 2, CANVAS_H / 2, CANVAS_W, CANVAS_H, 0x0a1030)
       .setAlpha(0).setDepth(60);
+    this.seasonOv = this.add.rectangle(CANVAS_W / 2, CANVAS_H / 2, CANVAS_W, CANVAS_H, 0xffffff)
+      .setAlpha(0).setDepth(59).setBlendMode(Phaser.BlendModes.OVERLAY);
 
     // water sparkle
     this.waves = Array.from({ length: 6 }, (_, i) =>
@@ -226,6 +279,43 @@ export default class MainScene extends Phaser.Scene {
 
   _updateDynamic(t, dt) {
     const w = this.world;
+    const ct = w.clock.t;
+
+    // sky color
+    this.skyRect.setFillStyle(skyColorAt(ct));
+
+    // sun arc (visible while it's day/evening)
+    {
+      const f = Phaser.Math.Clamp(ct / 110, 0, 1);
+      this.sun.x = Phaser.Math.Linear(60, CANVAS_W - 60, f);
+      this.sun.y = 350 - Math.sin(f * Math.PI) * 310;
+      const edge = Math.min(ct, 110 - ct);
+      this.sun.setAlpha(Phaser.Math.Clamp(edge / 8, 0, 1));
+    }
+    // moon arc (visible through the night, spanning the day boundary)
+    {
+      const nightT = ct >= 110 ? ct - 110 : ct + 30;
+      const f = Phaser.Math.Clamp(nightT / 40, 0, 1);
+      this.moon.x = Phaser.Math.Linear(60, CANVAS_W - 60, f);
+      this.moon.y = 350 - Math.sin(f * Math.PI) * 310;
+      const edge = Math.min(nightT, 40 - nightT);
+      const cloudDim = w.weather === "sunny" ? 1 : w.weather === "cloudy" ? 0.7 : 0.4;
+      this.moon.setAlpha(Phaser.Math.Clamp(edge / 8, 0, 1) * cloudDim);
+    }
+    // stars twinkle at night, dimmed by cloud cover
+    const starBase = this.nightOv.alpha / 0.42;
+    const cloudDim = w.weather === "sunny" ? 1 : w.weather === "cloudy" ? 0.55 : 0.3;
+    for (const s of this.stars) {
+      const tw = 0.55 + 0.45 * Math.sin(t * 2 + s.getData("tw"));
+      s.setAlpha(Phaser.Math.Clamp(starBase, 0, 1) * cloudDim * tw);
+    }
+    // clouds drift; density/opacity follow weather
+    const cloudTarget = w.weather === "sunny" ? 0.12 : w.weather === "cloudy" ? 0.55 : 0.7;
+    for (const c of this.clouds) {
+      c.x += c.getData("spd") * dt;
+      if (c.x > CANVAS_W + 40) c.x = -40;
+      c.alpha += (cloudTarget - c.alpha) * Math.min(1, dt * 1.5);
+    }
 
     // boat
     const b = w.boat;
@@ -258,14 +348,35 @@ export default class MainScene extends Phaser.Scene {
     const target = targets[w.phase] + (w.storm.active ? 0.18 : 0);
     this.nightOv.alpha += (target - this.nightOv.alpha) * Math.min(1, dt * 2);
 
+    const seasonColor = SEASON_TINT[w.season];
+    const seasonTarget = seasonColor === null ? 0 : 0.08;
+    this.seasonOv.alpha += (seasonTarget - this.seasonOv.alpha) * Math.min(1, dt * 1.5);
+    if (seasonColor !== null) this.seasonOv.setFillStyle(seasonColor);
+
+    const precip = w.storm.active || w.weather === "rain";
+    const snowing = precip && w.isSnowing;
+    const rainSpeed = w.storm.active ? 270 : 130;
+    const rainDrift = w.storm.active ? 40 : 12;
     for (const r of this.rain) {
-      r.setVisible(w.storm.active);
-      if (w.storm.active) {
-        r.y += 270 * dt;
-        r.x -= 40 * dt;
+      const on = precip && !snowing;
+      r.setVisible(on);
+      if (on) {
+        r.y += rainSpeed * dt;
+        r.x -= rainDrift * dt;
         if (r.y > CANVAS_H) {
           r.y = -10;
           r.x = Math.random() * (CANVAS_W + 60);
+        }
+      }
+    }
+    for (const s of this.snow) {
+      s.setVisible(snowing);
+      if (snowing) {
+        s.y += 32 * dt;
+        s.x += Math.sin(t * 1.2 + s.getData("sway")) * 12 * dt;
+        if (s.y > CANVAS_H) {
+          s.y = -6;
+          s.x = Math.random() * CANVAS_W;
         }
       }
     }
@@ -275,12 +386,13 @@ export default class MainScene extends Phaser.Scene {
     }
 
     // HUD
-    const icons = { day: "☀️", evening: "🌇", night: "🌙" };
-    const icon = w.storm.active ? "⛈" : icons[w.phase];
+    const wIcons = { sunny: "☀️", cloudy: "☁️", rain: snowing ? "❄️" : "🌧" };
+    const icon = w.storm.active ? "⛈" : wIcons[w.weather];
+    const seasonIcon = SEASON_INFO[w.season].icon;
     const sleeping = this.students.filter((s) => s.state === "sleep" || s.state === "bedrest").length;
     const sickCount = this.students.filter((s) => s.sick).length;
     this.hud.setText(
-      `Day ${w.clock.day} ${icon}  🍙${w.stocks.food} 💊${w.stocks.medicine} 🪵${w.stocks.material} 🔧${w.stocks.tool}  😴${sleeping} 🤒${sickCount}`);
+      `Day ${w.clock.day} ${seasonIcon} ${icon}  🍙${w.stocks.food} 💊${w.stocks.medicine} 🪵${w.stocks.material} 🔧${w.stocks.tool}  😴${sleeping} 🤒${sickCount}`);
 
     for (let i = 0; i < this.logTexts.length; i++) {
       const line = w.logs[i] ?? "";
