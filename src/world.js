@@ -1,6 +1,6 @@
 import {
   BX0, BX1, ROOMS, ROOM_W, PLOT_XS, FISH_SPOT_XS, PIER_L, PIER_R,
-  INFIRMARY_BEDS, FLOOR_BOTTOM_Y, FLOOR_NAMES, FLOOR_H, tileCX,
+  INFIRMARY_BEDS, FLOOR_BOTTOM_Y, FLOOR_NAMES, FLOOR_H, WATER_Y, tileCX,
 } from "./mapData.js";
 
 const DAY_LEN = 140; // seconds per in-game day
@@ -36,7 +36,9 @@ export class World {
     this.driftT = 6;
     this.eventT = 45;
     this.boat = { phase: "none", x: -80, t: 70, traded: false, tradeTask: null };
-    this.storm = { active: false, t: 0 };
+    this.storm = { active: false, t: 0, kind: "rain" };
+    this.heat = { active: false, t: 0 };
+    this.flood = { active: false, t: 0, level: 0, waterY: WATER_Y };
     this.weather = "sunny";
     this.weatherT = 30 + Math.random() * 20;
     this.sickList = []; // {student, t, treated, treatT}
@@ -66,6 +68,14 @@ export class World {
     return this.season === "winter" ? 1.6 : this.season === "summer" ? 0.85 : 1;
   }
 
+  get bedsBlocked() {
+    return this.flood.active && this.flood.level >= 2;
+  }
+
+  get bigCrisisActive() {
+    return this.storm.active || this.heat.active || this.flood.active;
+  }
+
   log(text, chance = 1) {
     if (Math.random() > chance) return;
     this.logs.push(text);
@@ -91,7 +101,7 @@ export class World {
 
     this.driftT -= dt;
     if (this.driftT <= 0) {
-      if (this.items.length < 7 && !this.storm.active) this.spawnDrift();
+      if (this.items.length < 7 && !this.storm.active && !this.flood.active) this.spawnDrift();
       this.driftT = 9 + Math.random() * 6;
     }
 
@@ -118,6 +128,16 @@ export class World {
       this.storm.t -= dt;
       if (this.storm.t <= 0) this.endStorm();
     }
+    if (this.heat.active) {
+      this.heat.t -= dt;
+      if (this.heat.t <= 0) this.endHeat();
+    }
+    if (this.flood.active) {
+      this.flood.t -= dt;
+      if (this.flood.t <= 0) this.endFlood();
+    }
+    const floodTargetY = this.flood.active ? FLOOR_BOTTOM_Y[this.flood.level] : WATER_Y;
+    this.flood.waterY += (floodTargetY - this.flood.waterY) * Math.min(1, dt * 0.8);
 
     this.updateBoat(dt);
 
@@ -214,9 +234,30 @@ export class World {
 
   taskAllowed(t) {
     if (this.storm.active && OUTDOOR_TYPES.includes(t.type)) return false;
+    if (this.flood.active && (t.type === "haul" || t.type === "trade")) return false;
     if (t.type === "repair" && this.stocks.material < 1) return false;
     if (t.type === "medicine" && this.stocks.medicine < 1) return false;
     return true;
+  }
+
+  // A student proactively grabs a task matching their favorite kind of work,
+  // even if it isn't the board's top priority. Falls back to null.
+  claimFavoriteTask(student) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of this.tasks) {
+      if (t.claimed || t.cancelled || t.type !== student.favTask) continue;
+      if (!this.taskAllowed(t)) continue;
+      const pos = this.taskPos(t);
+      const d = Math.abs(pos.x - student.x) + Math.abs(pos.f - student.f) * 12;
+      if (d < bestDist) { bestDist = d; best = t; }
+    }
+    if (best) {
+      best.claimed = student;
+      if (best.type === "repair") this.stocks.material--;
+      if (best.type === "medicine") this.stocks.medicine--;
+    }
+    return best;
   }
 
   taskPos(t) {
@@ -258,24 +299,41 @@ export class World {
 
   randomEvent() {
     const r = Math.random();
-    if (r < 0.30) {
+    if (r < 0.22) {
       this.makeLeak();
-    } else if (r < 0.52) {
+    } else if (r < 0.40) {
       const c = this.students.filter((s) => !s.sick && !s.exhausted);
       if (c.length) this.makeSick(c[(Math.random() * c.length) | 0]);
       else this.makeLeak();
-    } else if (r < 0.67) {
+    } else if (r < 0.52) {
       if (this.stocks.food > 2) {
         this.stocks.food -= 2;
         this.log("🐀 ネズミが食料をかじった…(食料-2)");
       } else this.spawnBonus();
-    } else if (r < 0.82) {
+    } else if (r < 0.64) {
       this.spawnBonus();
-    } else if (!this.storm.active && this.weather === "rain") {
-      this.startStorm();
+    } else if (r < 0.70) {
+      this.lowTide();
+    } else if (this.bigCrisisActive) {
+      this.makeLeak(); // a big crisis is already running - just add friction
+    } else if (this.season === "winter" && this.weather === "rain") {
+      this.startStorm("snow");
+    } else if (this.season === "summer" && r < 0.85) {
+      this.startHeat();
+    } else if (this.weather === "rain") {
+      this.startStorm("rain");
+    } else if (r < 0.94) {
+      this.startFlood();
     } else {
       this.makeLeak();
     }
+  }
+
+  lowTide() {
+    const bonus = { food: 3, material: 2, tool: 1 };
+    for (const [k, v] of Object.entries(bonus)) this.stocks[k] += v;
+    for (let i = 0; i < 2 + ((Math.random() * 2) | 0); i++) this.spawnDrift();
+    this.log("🏖️ 潮が引いて地面が見えた!埋まっていた物資を見つけた");
   }
 
   spawnBonus() {
@@ -334,23 +392,25 @@ export class World {
     this.infOcc.delete(st);
   }
 
-  // ---- storm ---------------------------------------------------------------
+  // ---- storm / blizzard -----------------------------------------------------
 
-  startStorm() {
+  startStorm(kind = "rain") {
     this.storm.active = true;
+    this.storm.kind = kind;
     this.storm.t = 20;
     this.weather = "rain";
-    this.log("⛈ 嵐が来た!みんな屋内へ!");
+    this.log(kind === "snow" ? "🌨 猛吹雪が来た!みんな屋内へ!" : "⛈ 嵐が来た!みんな屋内へ!");
     for (const st of this.students) {
       const outdoor = st.f === 3 || st.x < BX0 || st.x >= BX1 || st.fishSpot;
       if (outdoor) {
         st.interrupt();
-        st.setEmote("💦");
+        st.setEmote(kind === "snow" ? "🥶" : "💦");
       }
     }
   }
 
   endStorm() {
+    const wasSnow = this.storm.kind === "snow";
     this.storm.active = false;
     this.weather = "cloudy";
     this.weatherT = 25 + Math.random() * 30;
@@ -361,11 +421,62 @@ export class World {
       p.stage--;
       p.watered = false;
       p.dirty = true;
-      this.log("🥀 嵐で屋上菜園が荒れてしまった…");
+      this.log(wasSnow ? "🥀 吹雪で屋上菜園が傷んでしまった…" : "🥀 嵐で屋上菜園が荒れてしまった…");
+    }
+    if (wasSnow && Math.random() < 0.4) {
+      const c = this.students.filter((s) => !s.sick && !s.exhausted);
+      if (c.length) this.makeSick(c[(Math.random() * c.length) | 0]);
     }
     const n = 3 + ((Math.random() * 3) | 0);
     for (let i = 0; i < n; i++) this.spawnDrift();
-    this.log("🌊 嵐が過ぎ去り、物資が流れ着いた!");
+    this.log(wasSnow ? "❄️ 吹雪が過ぎ去り、物資が流れ着いた!" : "🌊 嵐が過ぎ去り、物資が流れ着いた!");
+  }
+
+  // ---- heatwave --------------------------------------------------------------
+
+  startHeat() {
+    this.heat.active = true;
+    this.heat.t = 32;
+    this.log("🥵 猛烈な暑さがやってきた!のどが渇きやすくなりそう");
+  }
+
+  endHeat() {
+    this.heat.active = false;
+    if (this.stocks.food > 1 && Math.random() < 0.5) {
+      this.stocks.food -= 1;
+      this.log("😮‍💨 暑さが和らいだ。食料が少し傷んでしまった(食料-1)");
+    } else {
+      this.log("😮‍💨 暑さが和らいだ");
+    }
+  }
+
+  // ---- flood ------------------------------------------------------------------
+
+  startFlood() {
+    this.flood.active = true;
+    this.flood.level = Math.random() < 0.65 ? 1 : 2;
+    this.flood.t = 34;
+    for (const item of [...this.items]) this.pickItem(item);
+    this.tasks = this.tasks.filter((t) => t.type !== "haul");
+    for (const st of this.students) {
+      if (st.fishSpot || (st.f === 0 && (st.x < BX0 || st.x >= BX1))) {
+        st.interrupt();
+        st.setEmote("💦");
+      }
+    }
+    if (this.flood.level >= 2) {
+      this.log("🌊⚠️ 水位が大きく上昇してきた!2階の寝室まで危ない!");
+    } else {
+      this.log("🌊⚠️ 水位が上昇してきた!1階の物は流されてしまった");
+    }
+  }
+
+  endFlood() {
+    this.flood.active = false;
+    this.driftT = 1;
+    const n = 4 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < n; i++) this.spawnDrift();
+    this.log("🌊 水が引いた!漂着物が増えそうだ");
   }
 
   // ---- trading boat ----------------------------------------------------------
@@ -373,7 +484,7 @@ export class World {
   updateBoat(dt) {
     const b = this.boat;
     if (b.phase === "none") {
-      if (!this.storm.active) b.t -= dt;
+      if (!this.storm.active && !this.flood.active) b.t -= dt;
       if (b.t <= 0) {
         b.phase = "in";
         b.x = -80;

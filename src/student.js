@@ -1,11 +1,18 @@
 import {
   BX0, BX1, GRID_W, BEDS, BINS, DINING, PLAY_SPOTS, STUDY_SPOTS, TRADE_X,
-  tileCX, walkY,
+  MAKESHIFT_SLEEP, tileCX, walkY,
 } from "./mapData.js";
 import { findPath } from "./pathfinding.js";
 import { RES } from "./resource.js";
 
 const BASE_SPEED = 55; // px/sec
+const FAV_TASKS = ["haul", "tend", "harvest", "repair", "fish", "study"];
+const CHAT_LINES = [
+  "{a}と{b}がおしゃべりしている",
+  "{a}が{b}に今日あったことを話している",
+  "{a}と{b}が声をあげて笑っている",
+  "{a}と{b}がひそひそ話をしている",
+];
 
 export class Student {
   constructor(scene, world, name, idx) {
@@ -36,6 +43,12 @@ export class Student {
     this.sick = false;
     this.exhausted = false;
     this.nap = false;
+    this.poorSleep = false;
+    this.sleepDebt = 0; // 0-100, builds up from makeshift sleep spots
+
+    this.favTask = FAV_TASKS[(Math.random() * FAV_TASKS.length) | 0];
+    this.favSpotIdx = (Math.random() * PLAY_SPOTS.length) | 0;
+    this.chatCooldown = Math.random() * 20;
 
     const color = Phaser.Display.Color.HSLToColor(Math.random(), 0.5, 0.62).color;
     this.body = scene.add.circle(this.px, this.py, 6, color).setStrokeStyle(1, 0x10131a).setDepth(10);
@@ -80,14 +93,18 @@ export class Student {
   update(dt) {
     const w = this.world;
     const resting = this.state === "sleep" || this.state === "bedrest";
+    this.chatCooldown = Math.max(0, this.chatCooldown - dt);
 
     if (resting) {
-      this.energy = Math.min(100, this.energy + dt * (this.state === "sleep" ? 3.5 : 2.2));
-      this.hunger = Math.max(0, this.hunger - dt * 0.12);
+      const regen = this.state === "sleep" ? (this.poorSleep ? 1.8 : 3.5) : 2.2;
+      this.energy = Math.min(100, this.energy + dt * regen);
+      this.hunger = Math.max(0, this.hunger - dt * (w.heat.active ? 0.22 : 0.12));
     } else {
-      const drain = 0.22 * this.stamina * (this.working() ? 1.7 : 1) * (this.sick ? 1.6 : 1);
+      const heatMul = w.heat.active ? 1.5 : 1;
+      const debtMul = 1 + Math.min(1, this.sleepDebt / 100) * 0.5;
+      const drain = 0.22 * this.stamina * (this.working() ? 1.7 : 1) * (this.sick ? 1.6 : 1) * heatMul * debtMul;
       this.energy = Math.max(0, this.energy - dt * drain);
-      this.hunger = Math.max(0, this.hunger - dt * 0.3);
+      this.hunger = Math.max(0, this.hunger - dt * 0.3 * (w.heat.active ? 1.4 : 1));
     }
     if (this.state === "play") this.fun = Math.min(100, this.fun + dt * 4);
     else this.fun = Math.max(0, this.fun - dt * 0.35 * (this.state === "fish" ? 0.3 : 1));
@@ -118,6 +135,7 @@ export class Student {
         break;
       case "play":
       case "study":
+      case "chat":
         this.stateT -= dt;
         if (this.stateT <= 0) {
           this.setEmote("");
@@ -129,6 +147,10 @@ export class Student {
         const wake = this.nap ? this.energy >= 60 : w.phase === "day" && this.energy >= 40;
         if (wake) {
           this.nap = false;
+          this.sleepDebt = this.poorSleep
+            ? Math.min(100, this.sleepDebt + 18)
+            : Math.max(0, this.sleepDebt - 25);
+          this.poorSleep = false;
           this.setEmote("");
           this.state = "idle";
         }
@@ -164,6 +186,7 @@ export class Student {
     if (this.sick || this.exhausted) {
       return this._goBed(w.takeInfBed(this) || BEDS[this.bedIdx], "bedrest");
     }
+    if (phase !== "night" && this._tryChat()) return;
     if (phase === "night") {
       if (this.nightOwl && w.clock.t < 122 && this.energy > 30 && Math.random() < 0.8) {
         w.log(`🌙 ${this.name}は夜ふかしして遊んでいる`, 0.15);
@@ -184,6 +207,8 @@ export class Student {
       return this._goPlay();
     }
     // day
+    const fav = w.claimFavoriteTask(this);
+    if (fav) return this._startTask(fav);
     const task = w.claimTask(this);
     if (task) return this._startTask(task);
     if (this.fun <= 25) {
@@ -194,11 +219,35 @@ export class Student {
   }
 
   _ambient() {
+    const boost = 0.2;
+    const fishW = 0.3 + (this.favTask === "fish" ? boost : 0);
+    const studyW = 0.25 + (this.favTask === "study" ? boost : 0);
     const r = Math.random();
-    if (r < 0.3 && this._goFish()) return;
-    if (r < 0.55) return this._goStudy();
-    if (r < 0.8) return this._goWander();
+    if (r < fishW && this._goFish()) return;
+    if (r < fishW + studyW) return this._goStudy();
+    if (r < fishW + studyW + 0.25) return this._goWander();
     this._goPlay();
+  }
+
+  // Two idle students nearby strike up a quick conversation.
+  _tryChat() {
+    const w = this.world;
+    if (this.chatCooldown > 0 || Math.random() > 0.15) return false;
+    const partner = w.students.find((o) =>
+      o !== this && o.state === "idle" && o.chatCooldown <= 0 &&
+      !o.sick && !o.exhausted && o.f === this.f && Math.abs(o.x - this.x) <= 4);
+    if (!partner) return false;
+    const line = CHAT_LINES[(Math.random() * CHAT_LINES.length) | 0]
+      .replace("{a}", this.name).replace("{b}", partner.name);
+    w.log(`💬 ${line}`, 0.85);
+    for (const s of [this, partner]) {
+      s.state = "chat";
+      s.stateT = 3 + Math.random() * 3;
+      s.setEmote("💬");
+      s.fun = Math.min(100, s.fun + 10);
+      s.chatCooldown = 45 + Math.random() * 30;
+    }
+    return true;
   }
 
   // ---- movement --------------------------------------------------------------
@@ -246,7 +295,9 @@ export class Student {
   }
 
   _speedMul() {
-    return (this.sick ? 0.5 : 1) * (this.exhausted ? 0.45 : 1) * (this.hunger <= 1 ? 0.6 : 1);
+    const w = this.world;
+    const blizzard = w.storm.active && w.storm.kind === "snow";
+    return (this.sick ? 0.5 : 1) * (this.exhausted ? 0.45 : 1) * (this.hunger <= 1 ? 0.6 : 1) * (blizzard ? 0.7 : 1);
   }
 
   _sync() {
@@ -273,19 +324,29 @@ export class Student {
   }
 
   _goBed(bed, mode) {
+    const w = this.world;
+    if (mode === "sleep" && w.bedsBlocked) {
+      bed = MAKESHIFT_SLEEP[(Math.random() * MAKESHIFT_SLEEP.length) | 0];
+      this.poorSleep = true;
+    } else if (mode === "sleep") {
+      this.poorSleep = false;
+    }
     this._goTo(bed.f, bed.x, () => {
       this.state = mode;
-      if (mode === "sleep") this.setEmote("💤");
+      if (mode === "sleep") this.setEmote(this.poorSleep ? "😪" : "💤");
     });
   }
 
   _goPlay() {
     const w = this.world;
     const spots = PLAY_SPOTS.filter((s) => !w.storm.active || s.f < 3);
-    const s = spots[(Math.random() * spots.length) | 0];
+    const fav = PLAY_SPOTS[this.favSpotIdx];
+    const useFav = spots.includes(fav) && Math.random() < 0.6;
+    const s = useFav ? fav : spots[(Math.random() * spots.length) | 0];
     this._goTo(s.f, s.x + ((Math.random() * 3) | 0) - 1, () => {
       this.state = "play";
       this.stateT = 9 + Math.random() * 6;
+      this.fun = Math.min(100, this.fun + (useFav ? 6 : 0));
       this.setEmote(s.emote);
     });
   }
@@ -303,14 +364,14 @@ export class Student {
     const w = this.world;
     const f = [0, 0, 1, 2, 3][(Math.random() * 5) | 0];
     let x;
-    if (f === 0 && !w.storm.active) x = (Math.random() * GRID_W) | 0;
+    if (f === 0 && !w.storm.active && !w.flood.active) x = (Math.random() * GRID_W) | 0;
     else x = BX0 + ((Math.random() * (BX1 - BX0)) | 0);
     this._goTo(f === 3 && w.storm.active ? 1 : f, x, null);
   }
 
   _goFish() {
     const w = this.world;
-    if (w.storm.active || w.phase !== "day") return false;
+    if (w.storm.active || w.flood.active || w.phase !== "day") return false;
     const spot = w.fishSpots.find((s) => !s.takenBy);
     if (!spot) return false;
     spot.takenBy = this;
@@ -338,7 +399,7 @@ export class Student {
       this.catches++;
       this.stateT = 8 + Math.random() * 7;
     }
-    const stop = w.phase !== "day" || w.storm.active ||
+    const stop = w.phase !== "day" || w.storm.active || w.flood.active ||
       this.hunger <= 22 || this.energy <= 14 || this.catches >= 3;
     if (stop) {
       if (this.fishSpot) {
