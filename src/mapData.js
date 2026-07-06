@@ -66,6 +66,10 @@ for (const slot of [1, 2, 3]) {
 }
 export const INFIRMARY_BEDS = [{ f: 0, x: 40 }, { f: 0, x: 42 }, { f: 0, x: 44 }];
 
+// Fallback spots to curl up in (floor 2+) when the flood submerges the
+// bedrooms on floor 1 - poor sleep, but better than nothing.
+export const MAKESHIFT_SLEEP = [{ f: 2, x: 17 }, { f: 2, x: 33 }, { f: 3, x: 43 }];
+
 // x may be fractional (used for drawing); round before pathfinding.
 export const BINS = {
   food:     { f: 0, x: 31 },

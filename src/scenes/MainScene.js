@@ -261,6 +261,11 @@ export default class MainScene extends Phaser.Scene {
       .setAlpha(0).setDepth(60);
     this.seasonOv = this.add.rectangle(CANVAS_W / 2, CANVAS_H / 2, CANVAS_W, CANVAS_H, 0xffffff)
       .setAlpha(0).setDepth(59).setBlendMode(Phaser.BlendModes.OVERLAY);
+    this.heatOv = this.add.rectangle(CANVAS_W / 2, CANVAS_H / 2, CANVAS_W, CANVAS_H, 0xff8a3d)
+      .setAlpha(0).setDepth(58);
+    // rising flood water, drawn over the rooms but under the UI
+    this.floodOv = this.add.rectangle(CANVAS_W / 2, CANVAS_H, CANVAS_W, 0, 0x1f5a82, 0.55)
+      .setOrigin(0.5, 1).setDepth(50);
 
     // water sparkle
     this.waves = Array.from({ length: 6 }, (_, i) =>
@@ -385,14 +390,23 @@ export default class MainScene extends Phaser.Scene {
       wave.x = (wave.x + 12 * dt) % CANVAS_W;
     }
 
+    // heatwave shimmer
+    const heatTarget = w.heat.active ? 0.1 + 0.05 * Math.sin(t * 4) : 0;
+    this.heatOv.alpha += (heatTarget - this.heatOv.alpha) * Math.min(1, dt * 2);
+
+    // rising flood water
+    this.floodOv.setSize(CANVAS_W, Math.max(0, CANVAS_H - w.flood.waterY));
+    this.floodOv.setDisplaySize(CANVAS_W, Math.max(0, CANVAS_H - w.flood.waterY));
+
     // HUD
     const wIcons = { sunny: "☀️", cloudy: "☁️", rain: snowing ? "❄️" : "🌧" };
-    const icon = w.storm.active ? "⛈" : wIcons[w.weather];
+    const icon = w.storm.active ? (w.storm.kind === "snow" ? "🌨" : "⛈") : wIcons[w.weather];
     const seasonIcon = SEASON_INFO[w.season].icon;
+    const crisisIcon = w.heat.active ? " 🥵" : w.flood.active ? ` 🌊Lv${w.flood.level}` : "";
     const sleeping = this.students.filter((s) => s.state === "sleep" || s.state === "bedrest").length;
     const sickCount = this.students.filter((s) => s.sick).length;
     this.hud.setText(
-      `Day ${w.clock.day} ${seasonIcon} ${icon}  🍙${w.stocks.food} 💊${w.stocks.medicine} 🪵${w.stocks.material} 🔧${w.stocks.tool}  😴${sleeping} 🤒${sickCount}`);
+      `Day ${w.clock.day} ${seasonIcon} ${icon}${crisisIcon}  🍙${w.stocks.food} 💊${w.stocks.medicine} 🪵${w.stocks.material} 🔧${w.stocks.tool}  😴${sleeping} 🤒${sickCount}`);
 
     for (let i = 0; i < this.logTexts.length; i++) {
       const line = w.logs[i] ?? "";
