@@ -1,12 +1,16 @@
+import { CANVAS_W, CANVAS_H } from "./mapData.js";
 import MainScene from "./scenes/MainScene.js";
 
 const config = {
   type: Phaser.AUTO,
-  width: 640,
-  height: 384,
   parent: "game-container",
-  backgroundColor: "#0d2740",
-  pixelArt: true,
+  backgroundColor: "#10131a",
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    width: CANVAS_W,
+    height: CANVAS_H,
+  },
   scene: [MainScene],
 };
 

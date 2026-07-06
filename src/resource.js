@@ -1,17 +1,7 @@
-export const RESOURCE_TYPES = {
-  food: { color: 0xe0a020, label: "食" },
-  medicine: { color: 0xe05070, label: "薬" },
-  tool: { color: 0x60a0e0, label: "工" },
-  material: { color: 0x80c060, label: "材" },
+export const RES = {
+  food:     { color: 0xe0a34a, label: "食", name: "食料" },
+  medicine: { color: 0xe06a86, label: "薬", name: "薬" },
+  material: { color: 0x8fbf6a, label: "材", name: "材料" },
+  tool:     { color: 0x6aa3e0, label: "工", name: "道具" },
 };
-
-let nextId = 1;
-
-export function spawnResource(scene, x, y) {
-  const types = Object.keys(RESOURCE_TYPES);
-  const type = types[Math.floor(Math.random() * types.length)];
-  const def = RESOURCE_TYPES[type];
-  const sprite = scene.add.rectangle(0, 0, 10, 10, def.color).setStrokeStyle(1, 0x000000);
-  const id = nextId++;
-  return { id, type, x, y, claimedBy: null, sprite };
-}
+export const RES_KEYS = Object.keys(RES);
