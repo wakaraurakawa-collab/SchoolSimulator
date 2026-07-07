@@ -18,6 +18,9 @@ export class Rat {
     this.targetPx = this.px;
     this.pauseT = 1 + Math.random() * 3;
     this.huntedBy = null;
+    this.scareT = 0;
+    this.scareCd = 0; // grace period so it doesn't flee every single frame
+    this.fleeDir = 1;
 
     const px = this.px, py = this.py;
     this.body = scene.add.ellipse(px, py, 11, 6, 0x6b5a4a).setStrokeStyle(1, 0x2a2018).setDepth(9);
@@ -31,8 +34,16 @@ export class Rat {
   // tile-space x, so students/pathfinding-adjacent code can treat it like a student
   get x() { return this.px / TILE; }
 
+  scare(sec) {
+    this.scareT = sec;
+    this.scareCd = sec + 6;
+    this.fleeDir = Math.random() < 0.5 ? -1 : 1;
+  }
+
   update(dt) {
     const w = this.world;
+    this.scareCd = Math.max(0, this.scareCd - dt);
+
     if (this.huntedBy) {
       const away = this.px < this.huntedBy.px ? -1 : 1;
       this.targetPx = Phaser.Math.Clamp(this.px + away * 90, TILE * 7, TILE * 44);
@@ -41,11 +52,35 @@ export class Rat {
       this._sync();
       return;
     }
+
+    // Skitter away from any student who wanders too close.
+    if (this.scareT <= 0 && this.scareCd <= 0) {
+      const near = w.students.find((s) =>
+        s.f === 0 && s.state !== "sleep" && s.state !== "bedrest" &&
+        Math.abs(s.px - this.px) < 26);
+      if (near) {
+        this.scare(1.2);
+        this.fleeDir = this.px < near.px ? -1 : 1;
+      }
+    }
+    if (this.scareT > 0) {
+      this.scareT -= dt;
+      this.targetPx = Phaser.Math.Clamp(this.px + this.fleeDir * 60, TILE * 8, TILE * 43);
+      this.emote.setText("💨");
+      this._moveToward(75, dt);
+      this._sync();
+      return;
+    }
+
     this.emote.setText("");
     this.pauseT -= dt;
     if (this.pauseT <= 0) {
       if (Math.abs(this.px - this.targetPx) < 2) {
-        if (Math.random() < 0.4 && w.stocks.food > 0 && !w.flood.active) {
+        // Only steals food when nobody is close enough to notice.
+        const watched = w.students.some((s) =>
+          s.f === 0 && s.state !== "sleep" && s.state !== "bedrest" &&
+          Math.abs(s.px - this.px) < 44);
+        if (!watched && Math.random() < 0.4 && w.stocks.food > 0 && !w.flood.active) {
           w.stocks.food = Math.max(0, w.stocks.food - 1);
           w.log("🐀 ネズミが食料をかじった…(食料-1)", 0.6);
         }
