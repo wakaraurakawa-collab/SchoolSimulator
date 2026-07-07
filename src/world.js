@@ -55,10 +55,6 @@ export class World {
     return t < 80 ? "day" : t < 110 ? "evening" : "night";
   }
 
-  get dayFrac() {
-    return this.clock.t / DAY_LEN;
-  }
-
   get season() {
     return SEASONS[Math.floor((this.clock.day - 1) / DAYS_PER_SEASON) % SEASONS.length];
   }
@@ -71,12 +67,19 @@ export class World {
     return this.season === "winter" ? 1.6 : this.season === "summer" ? 0.85 : 1;
   }
 
-  get bedsBlocked() {
-    return this.flood.active && this.flood.level >= 2;
+  // Fish bite slower in winter, a touch faster in autumn.
+  get fishMul() {
+    return this.season === "winter" ? 1.5 : this.season === "autumn" ? 0.9 : 1;
   }
 
   get bigCrisisActive() {
     return this.storm.active || this.heat.active || this.flood.active;
+  }
+
+  // Floors strictly below the flood level are underwater (level 1 = 1F,
+  // level 2 = 1F+2F). Students evacuate and won't start activities there.
+  isFloorFlooded(f) {
+    return this.flood.active && f < this.flood.level;
   }
 
   log(text, chance = 1) {
@@ -108,8 +111,15 @@ export class World {
       this.driftT = 9 + Math.random() * 6;
     }
 
+    // Rain waters the rooftop planters for free (snow doesn't).
+    const rainWater = this.weather === "rain" && !this.isSnowing;
     for (const p of this.plots) {
-      if ((p.stage === 1 || p.stage === 2) && p.watered) {
+      if (p.stage !== 1 && p.stage !== 2) continue;
+      if (rainWater && !p.watered) {
+        p.watered = true;
+        p.dirty = true;
+      }
+      if (p.watered) {
         p.t += dt / this.growthMul;
         if (p.t >= 40) {
           p.t = 0;
@@ -221,13 +231,23 @@ export class World {
 
   // ---- task board ----------------------------------------------------------
 
-  claimTask(student, urgentOnly = false) {
+  // Reserved stock is consumed at claim time and refunded if the task is
+  // released or cancelled, so two students never count on the same unit.
+  _reserve(t) {
+    if (t.type === "repair") this.stocks.material--;
+    if (t.type === "medicine") this.stocks.medicine--;
+  }
+
+  _refund(t) {
+    if (t.type === "repair") this.stocks.material++;
+    if (t.type === "medicine") this.stocks.medicine++;
+  }
+
+  _claimBest(student, filter) {
     let best = null;
     let bestScore = Infinity;
     for (const t of this.tasks) {
-      if (t.claimed || t.cancelled) continue;
-      if (urgentOnly && !URGENT_TYPES.includes(t.type)) continue;
-      if (!this.taskAllowed(t)) continue;
+      if (t.claimed || t.cancelled || !filter(t) || !this.taskAllowed(t)) continue;
       const pos = this.taskPos(t);
       const score = TASK_PRIORITY[t.type] * 1000 +
         Math.abs(pos.x - student.x) + Math.abs(pos.f - student.f) * 12;
@@ -238,38 +258,30 @@ export class World {
     }
     if (best) {
       best.claimed = student;
-      if (best.type === "repair") this.stocks.material--;
-      if (best.type === "medicine") this.stocks.medicine--;
+      this._reserve(best);
     }
     return best;
   }
 
-  taskAllowed(t) {
-    if (this.storm.active && OUTDOOR_TYPES.includes(t.type)) return false;
-    if (this.flood.active && (t.type === "haul" || t.type === "trade")) return false;
-    if (t.type === "repair" && this.stocks.material < 1) return false;
-    if (t.type === "medicine" && this.stocks.medicine < 1) return false;
-    return true;
+  claimTask(student, urgentOnly = false) {
+    return this._claimBest(student, (t) => !urgentOnly || URGENT_TYPES.includes(t.type));
   }
 
   // A student proactively grabs a task matching their favorite kind of work,
   // even if it isn't the board's top priority. Falls back to null.
   claimFavoriteTask(student) {
-    let best = null;
-    let bestDist = Infinity;
-    for (const t of this.tasks) {
-      if (t.claimed || t.cancelled || t.type !== student.favTask) continue;
-      if (!this.taskAllowed(t)) continue;
-      const pos = this.taskPos(t);
-      const d = Math.abs(pos.x - student.x) + Math.abs(pos.f - student.f) * 12;
-      if (d < bestDist) { bestDist = d; best = t; }
+    return this._claimBest(student, (t) => t.type === student.favTask);
+  }
+
+  taskAllowed(t) {
+    if (this.storm.active && OUTDOOR_TYPES.includes(t.type)) return false;
+    if (this.flood.active) {
+      if (t.type === "haul" || t.type === "trade") return false;
+      if (this.isFloorFlooded(this.taskPos(t).f)) return false; // e.g. medicine bin, 1F repairs
     }
-    if (best) {
-      best.claimed = student;
-      if (best.type === "repair") this.stocks.material--;
-      if (best.type === "medicine") this.stocks.medicine--;
-    }
-    return best;
+    if (t.type === "repair" && this.stocks.material < 1) return false;
+    if (t.type === "medicine" && this.stocks.medicine < 1) return false;
+    return true;
   }
 
   taskPos(t) {
@@ -285,8 +297,7 @@ export class World {
   // Student voluntarily gives a task back (interrupted). Refund reserves.
   releaseTask(t) {
     if (!t || !this.tasks.includes(t)) return;
-    if (t.type === "repair") this.stocks.material++;
-    if (t.type === "medicine") this.stocks.medicine++;
+    this._refund(t);
     t.claimed = null;
   }
 
@@ -295,10 +306,7 @@ export class World {
     if (!t) return;
     const i = this.tasks.indexOf(t);
     if (i >= 0) this.tasks.splice(i, 1);
-    if (t.claimed) {
-      if (t.type === "repair") this.stocks.material++;
-      if (t.type === "medicine") this.stocks.medicine++;
-    }
+    if (t.claimed) this._refund(t);
     t.cancelled = true;
   }
 
@@ -404,8 +412,10 @@ export class World {
       this.log(`🐀💨 ${student.name}がネズミを追い払った!`);
       this._removeRat(rat);
     } else if (roll < 0.8) {
-      this.log(`😲 ${student.name}はネズミに驚いて飛び退いた!`);
-      this._removeRat(rat);
+      // The rat slips away and lives to nibble another day.
+      this.log(`😲 ${student.name}はネズミに驚いて逃げられてしまった!`);
+      rat.huntedBy = null;
+      rat.scare(3);
     } else {
       this.log(`🐀😖 ${student.name}はネズミに反撃されて怪我をしてしまった…保健室へ`);
       this._removeRat(rat);
@@ -501,8 +511,9 @@ export class World {
     this.flood.t = 34;
     for (const item of [...this.items]) this.pickItem(item);
     this.tasks = this.tasks.filter((t) => t.type !== "haul");
+    // Everyone below the waterline (including sleepers) scrambles upstairs.
     for (const st of this.students) {
-      if (st.fishSpot || (st.f === 0 && (st.x < BX0 || st.x >= BX1))) {
+      if (st.f < this.flood.level || st.x < BX0 || st.x >= BX1 || st.fishSpot) {
         st.interrupt();
         st.setEmote("💦");
       }

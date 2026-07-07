@@ -106,7 +106,3 @@ export function walkY(f) {
 export function tileCX(x) {
   return x * TILE + TILE / 2;
 }
-
-export function roomAt(f, x) {
-  return ROOMS.find((r) => r.f === f && x >= r.x0 && x < r.x1) || null;
-}
